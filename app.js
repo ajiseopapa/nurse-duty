@@ -100,7 +100,8 @@ async function loadNurses() {
   const list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
   list.sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
   nurses = list.filter(n => n.name && n.name.trim() !== '')
-    .map(n => ({ id: n.id, name: n.name.trim(), role: n.role, grade: n.grade, offDays: n.off_days || [] }));
+    .map(n => ({ id: n.id, name: n.name.trim(), role: n.role, grade: n.grade, offDays: n.off_days || [],
+      annualLeaveTotal: (n.annual_leave_total != null ? n.annual_leave_total : 15) }));
 }
 
 // ── 근무표 로드/저장/삭제 ─────────────────────────────────
@@ -149,7 +150,7 @@ function toggleModal(show) {
   document.getElementById('nurseModal').className = 'overlay' + (show ? ' open' : '');
   if (show) renderNurseList();
 }
-function addNurseRow() { nurses.push({ id: Date.now(), name:'', role:'acting', grade:'RN', offDays:[] }); renderNurseList(); }
+function addNurseRow() { nurses.push({ id: Date.now(), name:'', role:'acting', grade:'RN', offDays:[], annualLeaveTotal:15 }); renderNurseList(); }
 function removeNurseRow(i) { nurses.splice(i,1); renderNurseList(); }
 function updateNurseField(i,f,v) { nurses[i][f] = v; }
 function updateGrade(i,v,el) {
@@ -185,7 +186,8 @@ async function saveNurses() {
     if (nurses.length > 0) {
       nurses.forEach((n, i) => {
         const ref = db.collection('nurses').doc();
-        batch.set(ref, { name: n.name, role: n.role, grade: n.grade, sort_order: i, off_days: n.offDays || [], ward_id: WARD_ID });
+        batch.set(ref, { name: n.name, role: n.role, grade: n.grade, sort_order: i, off_days: n.offDays || [],
+          annual_leave_total: (n.annualLeaveTotal != null ? n.annualLeaveTotal : 15), ward_id: WARD_ID });
       });
     }
     await batch.commit();
@@ -225,6 +227,10 @@ function renderNurseList() {
           <div onclick="event.stopPropagation();updateRole(${i},'acting',this)" style="color:#fbc02d">Acting</div>
         </div>
       </div>
+      <input type="number" step="0.5" min="0" value="${n.annualLeaveTotal!=null?n.annualLeaveTotal:15}"
+        onchange="updateNurseField(${i},'annualLeaveTotal',parseFloat(this.value)||0)"
+        title="연차 총일수" placeholder="연차"
+        style="width:56px;flex:0 0 56px;text-align:center;font-size:12px;padding:6px 4px;border:1px solid #e5e8eb;border-radius:6px">
       <button class="del-btn" onclick="removeNurseRow(${i})">✕</button>
     </div>`;
   }).join('');
@@ -256,6 +262,39 @@ function renderRoleBadge(role) {
   return '';
 }
 
+// ── 근무별 개인 통계 (해당 월 기준) ─────────────────────────
+const LEAVE_WEIGHTS = { V:1, v05:0.5, v25:0.25, v75:0.75 };
+function computeStats(p) {
+  const counts = { D:0, E:0, N:0, Off:0 };
+  let leaveUsed = 0;
+  (p.shifts || []).forEach(s => {
+    if (!s) return;
+    if (s==='D'||s==='D1'||s==='DH'||s==='MD') counts.D++;
+    else if (s==='E') counts.E++;
+    else if (s==='N') counts.N++;
+    else if (s==='O'||s==='Off') counts.Off++;
+    if (LEAVE_WEIGHTS[s] !== undefined) leaveUsed += LEAVE_WEIGHTS[s];
+  });
+  const nv = nurses.find(n => n.name === p.name);
+  const leaveTotal = (nv && nv.annualLeaveTotal != null) ? nv.annualLeaveTotal : 15;
+  leaveUsed = +leaveUsed.toFixed(2);
+  const leaveRemain = +(leaveTotal - leaveUsed).toFixed(2);
+  return { ...counts, leaveUsed, leaveTotal, leaveRemain };
+}
+function statCellsHTML(p) {
+  const st = computeStats(p);
+  return `<td style="font-weight:700;font-size:12px;background:#f8f9fa;color:#333">${st.D}</td>
+    <td style="font-weight:700;font-size:12px;background:#f8f9fa;color:#333">${st.E}</td>
+    <td style="font-weight:700;font-size:12px;background:#f8f9fa;color:#333">${st.N}</td>
+    <td style="font-weight:700;font-size:12px;background:#f8f9fa;color:#333">${st.Off}</td>
+    <td style="font-weight:700;font-size:11px;background:#fff3e0;color:#e65100" title="사용/총 ${st.leaveTotal}일">${st.leaveUsed}/${st.leaveRemain}</td>`;
+}
+const STAT_HEADER_HTML = `<th style="width:34px;background:#f1f3f5;font-size:11px">D</th>
+  <th style="width:34px;background:#f1f3f5;font-size:11px">E</th>
+  <th style="width:34px;background:#f1f3f5;font-size:11px">N</th>
+  <th style="width:34px;background:#f1f3f5;font-size:11px">Off</th>
+  <th style="width:58px;background:#fff3e0;font-size:11px">연차<br><span style="font-weight:400;font-size:9px">사용/잔여</span></th>`;
+
 // ── 메인 테이블 ────────────────────────────────────────────
 async function renderTable() {
   const daysInMonth = new Date(currentYear, currentMonth+1, 0).getDate();
@@ -267,6 +306,7 @@ async function renderTable() {
     const dc = dow===0?'sun':dow===6?'sat':'';
     headerRow.innerHTML += `<th class="${dc}" style="font-size:11px;padding:5px 0">${i}<br><span style="font-weight:normal;font-size:10px">(${wd[dow]})</span></th>`;
   }
+  headerRow.innerHTML += STAT_HEADER_HTML;
   document.getElementById('currentMonth').innerHTML = `${currentYear}년 ${currentMonth+1}월
     <button onclick="goCurrentMonth()" style="margin-left:8px;padding:4px 8px;font-size:12px;font-weight:600;color:#3182f6;background:#e8f3ff;border:none;border-radius:6px;cursor:pointer;vertical-align:middle">이번 달</button>`;
 
@@ -288,6 +328,7 @@ async function renderTable() {
         onclick="toggleShiftDropdown(event,'${key}',${ni},${di})"
         oncontextmenu="event.preventDefault();deleteShiftCell('${key}',${ni},${di})"
         style="cursor:pointer;font-size:13px;font-weight:bold;padding:6px 2px">${s||'-'}</td>`).join('')}
+      ${statCellsHTML(p)}
     </tr>`).join('');
   } else {
     const draftKey = key + '-draft';
@@ -317,6 +358,7 @@ async function renderTable() {
           style="cursor:pointer;font-size:13px;font-weight:bold;${s?'':'color:#ddd'}"
           title="${lk?'🔒 수동 고정':'클릭: 근무 선택 / 우클릭: 초기화'}">${s||'·'}</td>`;
       }).join('')}
+      ${statCellsHTML(p)}
     </tr>`).join('');
   }
 }
@@ -553,8 +595,10 @@ function exportToExcel() {
   const dim=new Date(currentYear,currentMonth+1,0).getDate(), wd=['일','월','화','수','목','금','토'];
   const header=['이름'];
   for(let d=1;d<=dim;d++){const dow=new Date(currentYear,currentMonth,d).getDay();header.push(`${d}(${wd[dow]})`);}
+  header.push('D','E','N','Off','연차사용','연차잔여');
   const rows=[header];
-  saved.forEach(p=>{const row=[`[${p.grade||'RN'}] ${p.name||''}`];p.shifts.forEach(s=>row.push(s||''));rows.push(row);});
+  saved.forEach(p=>{const row=[`[${p.grade||'RN'}] ${p.name||''}`];p.shifts.forEach(s=>row.push(s||''));
+    const st=computeStats(p);row.push(st.D,st.E,st.N,st.Off,st.leaveUsed,st.leaveRemain);rows.push(row);});
   const ws=XLSX.utils.aoa_to_sheet(rows),wb=XLSX.utils.book_new();
   const ward=getCurrentWard();
   XLSX.utils.book_append_sheet(wb,ws,`${currentYear}-${currentMonth+1}`);
@@ -585,16 +629,16 @@ window.addEventListener('keydown',function(e){
       setStatus('loading','연결 중...');
       await loadNurses();
       if(nurses.length===0){nurses=[
-        {id:1,name:'수선생님',role:'head',grade:'RN',offDays:[]},
-        {id:2,name:'간호사A',role:'charge',grade:'RN',offDays:[]},
-        {id:3,name:'간호사B',role:'acting',grade:'RN',offDays:[]},
-        {id:4,name:'간호사C',role:'acting',grade:'RN',offDays:[]},
-        {id:5,name:'간호사D',role:'acting',grade:'AN',offDays:[]}
+        {id:1,name:'수선생님',role:'head',grade:'RN',offDays:[],annualLeaveTotal:15},
+        {id:2,name:'간호사A',role:'charge',grade:'RN',offDays:[],annualLeaveTotal:15},
+        {id:3,name:'간호사B',role:'acting',grade:'RN',offDays:[],annualLeaveTotal:15},
+        {id:4,name:'간호사C',role:'acting',grade:'RN',offDays:[],annualLeaveTotal:15},
+        {id:5,name:'간호사D',role:'acting',grade:'AN',offDays:[],annualLeaveTotal:15}
       ];}
       setStatus('ok',`${getCurrentWard().name} · Firebase 연결됨`);
     }catch(e){
       setStatus('err','DB 연결 실패', e);
-      nurses=[{id:1,name:'수선생님',role:'head',grade:'RN',offDays:[]},{id:2,name:'간호사A',role:'charge',grade:'RN',offDays:[]},{id:3,name:'간호사B',role:'acting',grade:'RN',offDays:[]},{id:4,name:'간호사C',role:'acting',grade:'RN',offDays:[]},{id:5,name:'간호사D',role:'acting',grade:'AN',offDays:[]}];
+      nurses=[{id:1,name:'수선생님',role:'head',grade:'RN',offDays:[],annualLeaveTotal:15},{id:2,name:'간호사A',role:'charge',grade:'RN',offDays:[],annualLeaveTotal:15},{id:3,name:'간호사B',role:'acting',grade:'RN',offDays:[],annualLeaveTotal:15},{id:4,name:'간호사C',role:'acting',grade:'RN',offDays:[],annualLeaveTotal:15},{id:5,name:'간호사D',role:'acting',grade:'AN',offDays:[],annualLeaveTotal:15}];
     }
     renderTable();
   }else{
