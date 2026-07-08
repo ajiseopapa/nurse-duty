@@ -7,6 +7,8 @@
 <title>Professional Nurse Scheduler</title>
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
 <style>
   :root { --blue: #3182f6; --bg: #f2f4f6; --text: #868686; --sub: #4e5968; --red: #f04452; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -221,9 +223,22 @@ const WARD_CONFIG = [
 ];
 // ══════════════════════════════════════════════════════════
 
-const SB_URL = 'https://gnnafzxklvnkawlxwhul.supabase.co';
-const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdubmFmenhrbHZua2F3bHh3aHVsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg3OTg0NDAsImV4cCI6MjA5NDM3NDQ0MH0.smnxn0HpMBCOQ47KQgiYRknuVbtVrQA3zHgyuEATNto';
-const HDR = { 'apikey': SB_KEY, 'Authorization': 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', 'Prefer': 'return=representation' };
+const firebaseConfig = {
+  apiKey: "AIzaSyDH5jLGveC8qhHuJFJkLd9R4I57YtYzu0U",
+  authDomain: "nurse-duty-sgrh.firebaseapp.com",
+  projectId: "nurse-duty-sgrh",
+  storageBucket: "nurse-duty-sgrh.firebasestorage.app",
+  messagingSenderId: "963315585049",
+  appId: "1:963315585049:web:2b132a51cbaee4cf1f1a88",
+  measurementId: "G-S091ZDMHYF"
+};
+firebase.initializeApp(firebaseConfig);
+const db = firebase.firestore();
+
+function setStatus(state, msg) {
+  document.getElementById('statusDot').className = 'dot ' + state;
+  document.getElementById('statusText').textContent = msg;
+}
 
 let currentYear  = new Date().getFullYear();
 let currentMonth = new Date().getMonth();
@@ -289,30 +304,14 @@ function updateWardBanner() {
   document.title = `${w.name} 근무표`;
 }
 
-// ── Supabase helpers ───────────────────────────────────────
-async function sbGet(table, params='') {
-  const r = await fetch(`${SB_URL}/rest/v1/${table}?${params}`, { headers: HDR });
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
-}
-async function sbPost(table, body, extra={}) {
-  const r = await fetch(`${SB_URL}/rest/v1/${table}`, { method:'POST', headers:{...HDR,...extra}, body:JSON.stringify(body) });
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
-}
-async function sbDelete(table, filter) {
-  const r = await fetch(`${SB_URL}/rest/v1/${table}?${filter}`, { method:'DELETE', headers:HDR });
-  if (!r.ok) throw new Error(await r.text());
-}
-function setStatus(state, msg) {
-  document.getElementById('statusDot').className = 'dot ' + state;
-  document.getElementById('statusText').textContent = msg;
-}
+// ── Firestore helpers ───────────────────────────────────────
 
 // ── 인력 로드 (ward_id 필터) ──────────────────────────────
 async function loadNurses() {
-  const data = await sbGet('nurses', `ward_id=eq.${WARD_ID}&order=sort_order.asc`);
-  nurses = data.filter(n => n.name && n.name.trim() !== '')
+  const snap = await db.collection('nurses').where('ward_id', '==', WARD_ID).get();
+  const list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  list.sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
+  nurses = list.filter(n => n.name && n.name.trim() !== '')
     .map(n => ({ id: n.id, name: n.name.trim(), role: n.role, grade: n.grade, offDays: n.off_days || [] }));
 }
 
@@ -321,45 +320,40 @@ async function loadSchedule(year, month) {
   const memKey = `${year}-${month}`;
   if (allSchedules[memKey] !== undefined) return;
   try {
-    const data = await sbGet('schedules', `id=eq.${encodeURIComponent(wk(memKey))}`);
-    allSchedules[memKey] = data.length > 0 ? data[0].data : null;
+    const snap = await db.collection('schedules').doc(wk(memKey)).get();
+    allSchedules[memKey] = snap.exists ? snap.data().data : null;
   } catch(e) { allSchedules[memKey] = null; }
 }
 
 async function saveDraft(year, month, draftData) {
   const id = wk(`draft-${year}-${month}`);
-  let res = await fetch(`${SB_URL}/rest/v1/schedules`, {
-    method:'POST', headers:{...HDR,'Prefer':'resolution=merge-duplicates,return=representation'},
-    body: JSON.stringify({ id, year, month, data: draftData, ward_id: WARD_ID })
-  });
-  if (!res.ok) throw new Error(await res.text());
+  await db.collection('schedules').doc(id).set({ year, month, data: draftData, ward_id: WARD_ID });
 }
 
 async function loadDraft(year, month) {
   const id = wk(`draft-${year}-${month}`);
   try {
-    const data = await sbGet('schedules', `id=eq.${encodeURIComponent(id)}`);
-    return data.length > 0 ? data[0].data : null;
+    const snap = await db.collection('schedules').doc(id).get();
+    return snap.exists ? snap.data().data : null;
   } catch(e) { return null; }
 }
 
 async function saveSchedule(year, month, scheduleData) {
   const id = wk(`${year}-${month}`);
-  await sbPost('schedules',
-    { id, year, month, data: scheduleData, ward_id: WARD_ID, updated_at: new Date().toISOString() },
-    { 'Prefer':'resolution=merge-duplicates,return=representation' }
-  );
+  await db.collection('schedules').doc(id).set({
+    year, month, data: scheduleData, ward_id: WARD_ID, updated_at: new Date().toISOString()
+  });
 }
 
 async function deleteSchedule(year, month) {
   const id = wk(`${year}-${month}`);
-  await sbDelete('schedules', `id=eq.${encodeURIComponent(id)}`);
+  await db.collection('schedules').doc(id).delete();
   allSchedules[`${year}-${month}`] = null;
 }
 
 async function deleteDraft(year, month) {
   const id = wk(`draft-${year}-${month}`);
-  await sbDelete('schedules', `id=eq.${encodeURIComponent(id)}`);
+  await db.collection('schedules').doc(id).delete();
 }
 
 // ── 인력관리 모달 ──────────────────────────────────────────
@@ -396,17 +390,18 @@ async function saveNurses() {
     }
     nurses = validNurses;
 
-    // 해당 병동 인력만 삭제
-    const existing = await sbGet('nurses', `ward_id=eq.${WARD_ID}&select=id`);
-    for (const row of existing) {
-      const r = await fetch(`${SB_URL}/rest/v1/nurses?id=eq.${row.id}`, { method:'DELETE', headers:{...HDR,'Prefer':'return=minimal'} });
-      if (!r.ok) throw new Error('삭제 실패: ' + await r.text());
-    }
+    // 해당 병동 인력만 삭제 후 재삽입 (배치 처리)
+    const existingSnap = await db.collection('nurses').where('ward_id', '==', WARD_ID).get();
+    const batch = db.batch();
+    existingSnap.docs.forEach(docSnap => batch.delete(docSnap.ref));
     if (nurses.length > 0) {
-      const rows = nurses.map((n,i) => ({ name:n.name, role:n.role, grade:n.grade, sort_order:i, off_days:n.offDays||[], ward_id:WARD_ID }));
-      const r = await fetch(`${SB_URL}/rest/v1/nurses`, { method:'POST', headers:{...HDR,'Prefer':'return=minimal'}, body:JSON.stringify(rows) });
-      if (!r.ok) throw new Error('삽입 실패: ' + await r.text());
+      nurses.forEach((n, i) => {
+        const ref = db.collection('nurses').doc();
+        batch.set(ref, { name: n.name, role: n.role, grade: n.grade, sort_order: i, off_days: n.offDays || [], ward_id: WARD_ID });
+      });
     }
+    await batch.commit();
+
     await loadNurses();
     toggleModal(false);
     renderTable();
@@ -808,7 +803,7 @@ window.addEventListener('keydown',function(e){
         {id:4,name:'간호사C',role:'acting',grade:'RN',offDays:[]},
         {id:5,name:'간호사D',role:'acting',grade:'AN',offDays:[]}
       ];}
-      setStatus('ok',`${getCurrentWard().name} · Supabase 연결됨`);
+      setStatus('ok',`${getCurrentWard().name} · Firebase 연결됨`);
     }catch(e){
       setStatus('err','DB 연결 실패');
       nurses=[{id:1,name:'수선생님',role:'head',grade:'RN',offDays:[]},{id:2,name:'간호사A',role:'charge',grade:'RN',offDays:[]},{id:3,name:'간호사B',role:'acting',grade:'RN',offDays:[]},{id:4,name:'간호사C',role:'acting',grade:'RN',offDays:[]},{id:5,name:'간호사D',role:'acting',grade:'AN',offDays:[]}];
