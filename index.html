@@ -235,9 +235,12 @@ const firebaseConfig = {
 firebase.initializeApp(firebaseConfig);
 const db = firebase.firestore();
 
-function setStatus(state, msg) {
+function setStatus(state, msg, err) {
   document.getElementById('statusDot').className = 'dot ' + state;
   document.getElementById('statusText').textContent = msg;
+  if (state === 'err') {
+    console.error('[status:err]', msg, err || '');
+  }
 }
 
 let currentYear  = new Date().getFullYear();
@@ -805,7 +808,7 @@ window.addEventListener('keydown',function(e){
       ];}
       setStatus('ok',`${getCurrentWard().name} · Firebase 연결됨`);
     }catch(e){
-      setStatus('err','DB 연결 실패');
+      setStatus('err','DB 연결 실패', e);
       nurses=[{id:1,name:'수선생님',role:'head',grade:'RN',offDays:[]},{id:2,name:'간호사A',role:'charge',grade:'RN',offDays:[]},{id:3,name:'간호사B',role:'acting',grade:'RN',offDays:[]},{id:4,name:'간호사C',role:'acting',grade:'RN',offDays:[]},{id:5,name:'간호사D',role:'acting',grade:'AN',offDays:[]}];
     }
     renderTable();
